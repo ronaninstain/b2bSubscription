@@ -1,0 +1,8 @@
+.b2b-cs-courses .pagination { margin-top: 16px; }
+.b2b-cs-courses .pagination .page-numbers { margin: 0 4px; cursor: pointer; }
+.e-all-course-page-single-card { border: 1px solid #e5e5e5; padding: 12px; border-radius: 6px; }
+.e-all-course-single-card-img img { max-width: 100%; height: auto; display: block; }
+.e-all-course-single-card-title { margin-top: 8px; }
+.e-all-course-single-card-title .course-price { font-weight: bold; color: #111; }
+
+
