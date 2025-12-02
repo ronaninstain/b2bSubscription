@@ -8,13 +8,15 @@ class WooIntegration
 {
     private SubscriptionService $subscriptionService;
     private ProductMapper $productMapper;
+    private EnrollmentQueue $enrollmentQueue;
     private WplmsSync $wplmsSync;
 
-    public function __construct(SubscriptionService $subscriptionService, ProductMapper $productMapper)
+    public function __construct(SubscriptionService $subscriptionService, ProductMapper $productMapper, EnrollmentQueue $enrollmentQueue, WplmsSync $wplmsSync)
     {
         $this->subscriptionService = $subscriptionService;
         $this->productMapper = $productMapper;
-        $this->wplmsSync = new WplmsSync($productMapper);
+        $this->enrollmentQueue = $enrollmentQueue;
+        $this->wplmsSync = $wplmsSync;
     }
 
     public function init(): void
@@ -125,12 +127,9 @@ class WooIntegration
             if (!$userId) { continue; }
 
             if ($this->isSubscriptionPassProduct($productId)) {
-                // Grant access to all mapped courses
+                // Queue processing to avoid timeouts
                 $allCourseIds = $this->productMapper->getAllMappedCourseIds();
-                foreach ($allCourseIds as $courseId) {
-                    $this->subscriptionService->grantOrExtendAccess($userId, (int)$courseId, (string)$duration);
-                    $this->wplmsSync->enrollUserOnParent($userId, (int)$courseId, (string)$duration);
-                }
+                $this->enrollmentQueue->queueCourses($userId, $allCourseIds, (string)$duration);
             } else {
                 // Grant access to the single mapped course for this product
                 $courseId = $this->reverseLookupCourseId($productId);
@@ -168,10 +167,7 @@ class WooIntegration
 
             if ($this->isSubscriptionPassProduct($productId)) {
                 $allCourseIds = $this->productMapper->getAllMappedCourseIds();
-                foreach ($allCourseIds as $courseId) {
-                    $this->subscriptionService->grantOrExtendAccess($userId, (int)$courseId, (string)$duration);
-                    $this->wplmsSync->enrollUserOnParent($userId, (int)$courseId, (string)$duration);
-                }
+                $this->enrollmentQueue->queueCourses($userId, $allCourseIds, (string)$duration);
             } else {
                 $courseId = $this->reverseLookupCourseId($productId);
                 if ($courseId) {
