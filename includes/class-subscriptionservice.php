@@ -32,6 +32,125 @@ class SubscriptionService
         return !empty($row);
     }
 
+    /**
+     * Check if user has an active subscription pass product (purchased subscription that grants access to all courses)
+     */
+    public function hasActiveSubscriptionPass(int $userId): bool
+    {
+        if (!$userId) {
+            return false;
+        }
+
+        // Get all subscription pass product IDs
+        $subscriptionProductIds = $this->getSubscriptionPassProductIds();
+        if (empty($subscriptionProductIds)) {
+            return false;
+        }
+
+        // Check if user has any completed/processing orders with subscription pass products
+        $customer = new \WC_Customer($userId);
+        $orders = wc_get_orders([
+            'customer_id' => $userId,
+            'status' => ['completed', 'processing'],
+            'limit' => -1,
+        ]);
+
+        foreach ($orders as $order) {
+            foreach ($order->get_items() as $item) {
+                $productId = $item->get_product_id();
+                if (in_array($productId, $subscriptionProductIds, true)) {
+                    // Check if subscription is still valid based on order date and duration
+                    $duration = $this->getDurationFromOrderItem($item);
+                    $orderDate = $order->get_date_created();
+                    if ($this->isSubscriptionStillValid($orderDate, $duration)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Also check WooCommerce Subscriptions if active
+        if (class_exists('WC_Subscriptions')) {
+            $subscriptions = wcs_get_users_subscriptions($userId);
+            foreach ($subscriptions as $subscription) {
+                if (!in_array($subscription->get_status(), ['active', 'on-hold'], true)) {
+                    continue;
+                }
+                foreach ($subscription->get_items() as $item) {
+                    $productId = $item->get_product_id();
+                    if (in_array($productId, $subscriptionProductIds, true)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function getSubscriptionPassProductIds(): array
+    {
+        global $wpdb;
+        $productIds = [];
+        
+        // Get products marked as subscription pass
+        $passProducts = $wpdb->get_col(
+            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_b2b_cs_is_pass' AND meta_value = 'yes'"
+        );
+        $productIds = array_merge($productIds, array_map('intval', $passProducts));
+
+        // Get products from settings
+        $raw = (string) get_option('b2b_cs_subscription_product_ids', '');
+        if (!empty($raw)) {
+            $parts = array_filter(array_map('trim', explode(',', $raw)));
+            foreach ($parts as $p) {
+                if (is_numeric($p)) {
+                    $productIds[] = (int) $p;
+                }
+            }
+        }
+
+        return array_unique($productIds);
+    }
+
+    private function getDurationFromOrderItem($item): string
+    {
+        $duration = $item->get_meta('_b2b_cs_duration');
+        if (!empty($duration)) {
+            return $duration;
+        }
+        $productId = $item->get_product_id();
+        $predefined = get_post_meta($productId, '_b2b_cs_duration_key', true);
+        return !empty($predefined) ? $predefined : '3m';
+    }
+
+    private function isSubscriptionStillValid($orderDate, string $durationKey): bool
+    {
+        if ($durationKey === 'lifetime') {
+            return true;
+        }
+
+        $orderDateTime = is_a($orderDate, 'WC_DateTime') ? $orderDate : new \DateTime($orderDate);
+        $now = new \DateTime(current_time('mysql'));
+        
+        $expiryDate = clone $orderDateTime;
+        switch ($durationKey) {
+            case '3m':
+                $expiryDate->add(new \DateInterval('P3M'));
+                break;
+            case '6m':
+                $expiryDate->add(new \DateInterval('P6M'));
+                break;
+            case '1y':
+                $expiryDate->add(new \DateInterval('P1Y'));
+                break;
+            default:
+                $expiryDate->add(new \DateInterval('P3M'));
+        }
+
+        return $expiryDate > $now;
+    }
+
     private function upsertSubscription(int $userId, int $courseId, ?string $expiresAt): void
     {
         global $wpdb;

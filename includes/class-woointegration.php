@@ -37,6 +37,10 @@ class WooIntegration
         // Product settings: duration key per product
         add_action('woocommerce_product_options_general_product_data', [$this, 'addProductDurationField']);
         add_action('woocommerce_process_product_meta', [$this, 'saveProductDurationField']);
+
+        // Add filter to modify add to cart button for subscription users
+        add_filter('woocommerce_product_single_add_to_cart_text', [$this, 'modifyAddToCartButtonText'], 10, 2);
+        add_action('wp_footer', [$this, 'addEnrollButtonScript']);
     }
 
     public function renderDurationSelector(): void
@@ -127,9 +131,14 @@ class WooIntegration
             if (!$userId) { continue; }
 
             if ($this->isSubscriptionPassProduct($productId)) {
-                // Queue processing to avoid timeouts
-                $allCourseIds = $this->productMapper->getAllMappedCourseIds();
-                $this->enrollmentQueue->queueCourses($userId, $allCourseIds, (string)$duration);
+                // Don't auto-enroll users in all courses when they purchase subscription pass
+                // Instead, they can manually enroll in courses they want via the Enroll button
+                // This gives students the choice to enroll in courses they're interested in
+                Logger::log('Subscription pass purchased - user can now manually enroll in courses', [
+                    'user_id' => $userId,
+                    'product_id' => $productId,
+                    'duration' => $duration,
+                ]);
             } else {
                 // Grant access to the single mapped course for this product
                 $courseId = $this->reverseLookupCourseId($productId);
@@ -166,8 +175,13 @@ class WooIntegration
             if (empty($duration)) { $duration = '3m'; }
 
             if ($this->isSubscriptionPassProduct($productId)) {
-                $allCourseIds = $this->productMapper->getAllMappedCourseIds();
-                $this->enrollmentQueue->queueCourses($userId, $allCourseIds, (string)$duration);
+                // Don't auto-enroll on subscription renewal either
+                // Users can manually enroll in courses they want
+                Logger::log('Subscription pass renewed - user can continue to manually enroll in courses', [
+                    'user_id' => $userId,
+                    'product_id' => $productId,
+                    'duration' => $duration,
+                ]);
             } else {
                 $courseId = $this->reverseLookupCourseId($productId);
                 if ($courseId) {
@@ -269,6 +283,185 @@ class WooIntegration
             if ($period === 'year'  && $interval === 1) return '1y';
         }
         return '';
+    }
+
+    /**
+     * Modify add to cart button text for subscription users
+     */
+    public function modifyAddToCartButtonText(string $text, $product): string
+    {
+        if (!is_user_logged_in()) {
+            return $text;
+        }
+
+        $userId = get_current_user_id();
+        if (!$this->subscriptionService->hasActiveSubscriptionPass($userId)) {
+            return $text;
+        }
+
+        // Check if this product is mapped to a course
+        $courseId = $this->reverseLookupCourseId($product->get_id());
+        if (!$courseId) {
+            return $text;
+        }
+
+        // Check if user already has access to this course
+        if ($this->subscriptionService->hasAccess($userId, $courseId)) {
+            return __('Already Enrolled', 'b2b-course-subscriptions');
+        }
+
+        return __('Enroll', 'b2b-course-subscriptions');
+    }
+
+    /**
+     * Add JavaScript to handle enroll button functionality
+     */
+    public function addEnrollButtonScript(): void
+    {
+        if (!is_product()) {
+            return;
+        }
+
+        if (!is_user_logged_in()) {
+            return;
+        }
+
+        // Get product object - try global first, then get from post ID
+        global $product;
+        if (!$product || !is_object($product) || !method_exists($product, 'get_id')) {
+            $productId = get_the_ID();
+            if (!$productId) {
+                return;
+            }
+            $product = wc_get_product($productId);
+            if (!$product || !is_object($product)) {
+                return;
+            }
+        }
+
+        $productId = $product->get_id();
+        if (!$productId) {
+            return;
+        }
+
+        $userId = get_current_user_id();
+        if (!$this->subscriptionService->hasActiveSubscriptionPass($userId)) {
+            return;
+        }
+
+        $courseId = $this->reverseLookupCourseId($productId);
+        if (!$courseId) {
+            return;
+        }
+
+        // Check if user already has access
+        if ($this->subscriptionService->hasAccess($userId, $courseId)) {
+            return;
+        }
+
+        $ajaxUrl = admin_url('admin-ajax.php');
+        $nonce = wp_create_nonce('b2b_cs_enroll_nonce');
+        ?>
+        <script type="text/javascript">
+        window.b2bCsEnrollNonce = '<?php echo esc_js($nonce); ?>';
+        window.b2bCsAjaxUrl = '<?php echo esc_url($ajaxUrl); ?>';
+        (function($) {
+            $(document).ready(function() {
+                // Find the "Take This Course" or "Enroll" button and modify it
+                var $enrollButton = $('a.course-link, .single_add_to_cart_button, button.single_add_to_cart_button');
+                
+                // Also check for custom button classes
+                if ($enrollButton.length === 0) {
+                    $enrollButton = $('a[href*="add-to-cart"]');
+                }
+
+                if ($enrollButton.length > 0) {
+                    var courseId = <?php echo intval($courseId); ?>;
+                    var originalHref = $enrollButton.attr('href');
+                    var originalText = $enrollButton.text().trim();
+                    
+                    // Only modify if it says "Take This Course" or "Enroll"
+                    if (originalText.toLowerCase().includes('take this course') || 
+                        originalText.toLowerCase().includes('enroll') ||
+                        originalHref && originalHref.includes('add-to-cart')) {
+                        
+                        $enrollButton
+                            .text('<?php echo esc_js(__('Enroll', 'b2b-course-subscriptions')); ?>')
+                            .attr('href', '#')
+                            .addClass('b2b-cs-enroll-btn')
+                            .off('click')
+                            .on('click', function(e) {
+                                e.preventDefault();
+                                
+                                var $btn = $(this);
+                                var originalBtnText = $btn.text();
+                                
+                                // Disable button and show loading
+                                $btn.prop('disabled', true).text('<?php echo esc_js(__('Enrolling...', 'b2b-course-subscriptions')); ?>');
+                                
+                                $.ajax({
+                                    url: '<?php echo esc_url($ajaxUrl); ?>',
+                                    type: 'POST',
+                                    data: {
+                                        action: 'b2b_cs_enroll_course',
+                                        course_id: courseId,
+                                        _ajax_nonce: window.b2bCsEnrollNonce || '<?php echo esc_js($nonce); ?>'
+                                    },
+                                    success: function(response) {
+                                        if (response.success) {
+                                            $btn.text('<?php echo esc_js(__('Enrolled!', 'b2b-course-subscriptions')); ?>')
+                                                .removeClass('b2b-cs-enroll-btn')
+                                                .addClass('b2b-cs-enrolled')
+                                                .prop('disabled', false);
+                                            
+                                            // Show success message
+                                            if (response.data && response.data.message) {
+                                                alert(response.data.message);
+                                            }
+                                            
+                                            // Optionally redirect or reload
+                                            setTimeout(function() {
+                                                location.reload();
+                                            }, 1500);
+                                        } else {
+                                            $btn.prop('disabled', false).text(originalBtnText);
+                                            alert(response.data && response.data.message ? response.data.message : '<?php echo esc_js(__('Failed to enroll. Please try again.', 'b2b-course-subscriptions')); ?>');
+                                        }
+                                    },
+                                    error: function() {
+                                        $btn.prop('disabled', false).text(originalBtnText);
+                                        alert('<?php echo esc_js(__('An error occurred. Please try again.', 'b2b-course-subscriptions')); ?>');
+                                    }
+                                });
+                            });
+                    }
+                }
+            });
+        })(jQuery);
+        </script>
+        <?php
+    }
+
+    /**
+     * Helper function to check if user has active subscription (for use in templates)
+     */
+    public static function userHasActiveSubscription(): bool
+    {
+        if (!is_user_logged_in()) {
+            return false;
+        }
+
+        $subscriptionService = new SubscriptionService();
+        return $subscriptionService->hasActiveSubscriptionPass(get_current_user_id());
+    }
+
+    /**
+     * Helper function to get course ID from product ID (for use in templates)
+     */
+    public static function getCourseIdFromProduct(int $productId): ?int
+    {
+        $mapper = new ProductMapper();
+        return $mapper->getCourseIdByProductId($productId);
     }
 }
 
