@@ -3,7 +3,7 @@
 /**
  * Plugin Name: B2B Course Subscriptions
  * Description: WooCommerce-based subscriptions for external courses from Course Dashboard. Maps courses to products via `ptc_items`, provides Ajax price lookup, and creates time-bound access for learners.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Shoive Hossain
  * Author URI: https://github.com/ronaninstain/
  * License: GPLv2 or later

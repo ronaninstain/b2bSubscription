@@ -172,7 +172,77 @@
     const initialType = getUrlParameter('type') || 'general';
     const initialCategory = getUrlParameter('category') || '';
     fetchCourses(initialCpage, initialType, initialCategory);
+
+    // Handle Enroll button clicks for subscription users
+    const enrollButtons = document.querySelectorAll('.b2b-cs-enroll-btn');
+    if (enrollButtons.length > 0) {
+      const enrollAjaxUrl = window.b2bCsAjaxUrl || ajaxUrl || '/wp-admin/admin-ajax.php';
+      
+      enrollButtons.forEach(function(button) {
+        button.addEventListener('click', function(e) {
+          e.preventDefault();
+          
+          const courseId = this.getAttribute('data-course-id') || this.dataset.courseId;
+          if (!courseId) {
+            alert('Course ID not found.');
+            return;
+          }
+
+          const originalText = this.textContent;
+          this.disabled = true;
+          this.textContent = 'Enrolling...';
+
+          const formData = new URLSearchParams();
+          formData.append('action', 'b2b_cs_enroll_course');
+          formData.append('course_id', courseId);
+          
+          // Get nonce from window object or meta tag
+          const nonce = window.b2bCsEnrollNonce || (function() {
+            const nonceInput = document.querySelector('input[name="_ajax_nonce"]');
+            return nonceInput ? nonceInput.value : '';
+          })();
+          if (nonce) {
+            formData.append('_ajax_nonce', nonce);
+          }
+
+          fetch(enrollAjaxUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: formData.toString(),
+            credentials: 'same-origin'
+          })
+            .then(response => response.json())
+            .then(data => {
+              if (data.success) {
+                this.textContent = 'Enrolled!';
+                this.classList.remove('b2b-cs-enroll-btn');
+                this.classList.add('b2b-cs-enrolled');
+                this.style.opacity = '0.7';
+                this.style.cursor = 'default';
+                
+                if (data.data && data.data.message) {
+                  alert(data.data.message);
+                }
+                
+                setTimeout(function() {
+                  location.reload();
+                }, 1500);
+              } else {
+                this.disabled = false;
+                this.textContent = originalText;
+                alert(data.data && data.data.message ? data.data.message : 'Failed to enroll. Please try again.');
+              }
+            })
+            .catch(error => {
+              this.disabled = false;
+              this.textContent = originalText;
+              alert('An error occurred. Please try again.');
+              console.error('Enrollment error:', error);
+            });
+        });
+      });
+    }
   });
 })();
-
-
